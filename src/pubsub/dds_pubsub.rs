@@ -1,4 +1,4 @@
-use std::{io, marker::PhantomData};
+use std::{io, marker::PhantomData, pin::Pin};
 
 use mio::{Evented, Poll, PollOpt, Ready, Token};
 use futures::{
@@ -13,23 +13,34 @@ use rustdds::{
 };
 use serde::{de::DeserializeOwned, Serialize};
 
-use super::{gid::Gid, message_info::MessageInfo, node::Node};
+use crate::{gid::Gid, message_info::MessageInfo, node::Node};
 
 /// A ROS2 Publisher
 ///
 /// Corresponds to a simplified [`DataWriter`](rustdds::no_key::DataWriter)in
 /// DDS
-pub struct Publisher<M: Serialize> {
+pub struct DdsPublisher<M: Serialize + Send> {
   datawriter: no_key::DataWriterCdr<M>,
 }
 
-impl<M: Serialize> Publisher<M> {
+impl<M: Serialize + Send> DdsPublisher<M> {
   // These must be created from Node
-  pub(crate) fn new(datawriter: no_key::DataWriterCdr<M>) -> Publisher<M> {
-    Publisher { datawriter }
+  pub(crate) fn new(datawriter: no_key::DataWriterCdr<M>) -> DdsPublisher<M> {
+    DdsPublisher { datawriter }
   }
 
-  pub fn publish(&self, message: M) -> WriteResult<(), M> {
+  #[allow(dead_code)] // This is for async Service implementation. Remove this when it is implemented.
+  pub(crate) async fn async_publish_with_options(
+    &self,
+    message: M,
+    wo: WriteOptions,
+  ) -> dds::WriteResult<rustdds::rpc::SampleIdentity, M> {
+    self.datawriter.async_write_with_options(message, wo).await
+  }
+}
+
+impl<M: Serialize + Send> super::Publisher<M> for DdsPublisher<M> {
+  fn publish(&self, message: M) -> WriteResult<(), M> {
     self.datawriter.write(message, Some(Timestamp::now()))
   }
 
@@ -41,15 +52,15 @@ impl<M: Serialize> Publisher<M> {
   //   self.datawriter.write_with_options(message, wo)
   // }
 
-  pub fn assert_liveliness(&self) -> WriteResult<(), ()> {
+  fn assert_liveliness(&self) -> WriteResult<(), ()> {
     self.datawriter.assert_liveliness()
   }
 
-  pub fn guid(&self) -> rustdds::GUID {
+  fn guid(&self) -> rustdds::GUID {
     self.datawriter.guid()
   }
 
-  pub fn gid(&self) -> Gid {
+  fn gid(&self) -> Gid {
     self.guid().into()
   }
 
@@ -57,7 +68,7 @@ impl<M: Serialize> Publisher<M> {
   ///
   /// `my_node` must be the Node that created this Publisher, or the result is
   /// undefined.
-  pub fn get_subscription_count(&self, my_node: &Node) -> usize {
+  fn get_subscription_count(&self, my_node: &Node) -> usize {
     my_node.get_subscription_count(self.guid())
   }
 
@@ -66,24 +77,17 @@ impl<M: Serialize> Publisher<M> {
   ///
   /// `my_node` must be the Node that created this Subscription, or the length
   /// of the wait is undefined.
-  pub fn wait_for_subscription(&self, my_node: &Node) -> impl Future<Output = ()> + Send {
-    my_node.wait_for_reader(self.guid())
+  fn wait_for_subscription(&self, my_node: &Node) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    Box::pin(my_node.wait_for_reader(self.guid()))
   }
 
-  pub async fn async_publish(&self, message: M) -> WriteResult<(), M> {
-    self
-      .datawriter
-      .async_write(message, Some(Timestamp::now()))
-      .await
-  }
-
-  #[allow(dead_code)] // This is for async Service implementation. Remove this when it is implemented.
-  pub(crate) async fn async_publish_with_options(
-    &self,
-    message: M,
-    wo: WriteOptions,
-  ) -> dds::WriteResult<rustdds::rpc::SampleIdentity, M> {
-    self.datawriter.async_write_with_options(message, wo).await
+  fn async_publish(&self, message: M) -> Pin<Box<dyn Future<Output = WriteResult<(), M>> + Send>> {
+    Box::pin(async move {
+      self
+        .datawriter
+        .async_write(message, Some(Timestamp::now()))
+        .await
+    })
   }
 }
 // ----------------------------------------------------

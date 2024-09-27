@@ -70,6 +70,7 @@ pub mod unique_identifier_msgs;
 #[deprecated] // we should remove the rest of these
 pub mod interfaces;
 
+#[doc(hidden)]
 /// ROS 2 Action machinery
 pub mod action;
 pub mod entities_info;
@@ -79,7 +80,6 @@ pub mod message;
 pub mod message_info;
 pub mod names;
 pub mod parameters;
-#[doc(hidden)]
 pub mod pubsub;
 pub mod rcl_interfaces;
 pub mod ros_time;

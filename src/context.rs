@@ -23,7 +23,7 @@ use crate::{
   gid::Gid,
   names::*,
   node::{Node, NodeOptions},
-  pubsub::{Publisher, Subscription},
+  pubsub::{self, DdsPublisher, Subscription},
   NodeCreateError,
 };
 
@@ -243,15 +243,15 @@ impl Context {
     &self,
     topic: &Topic,
     qos: Option<QosPolicies>,
-  ) -> dds::CreateResult<Publisher<M>>
+  ) -> dds::CreateResult<Box<dyn pubsub::Publisher<M>>>
   where
-    M: Serialize,
+    M: Serialize + Send,
   {
     let datawriter = self
       .get_ros_default_publisher()
       .create_datawriter_no_key(topic, qos)?;
 
-    Ok(Publisher::new(datawriter))
+    Ok(Box::new(DdsPublisher::new(datawriter)))
   }
 
   pub(crate) fn create_subscription<M>(
@@ -366,8 +366,9 @@ impl ContextInner {
       TopicKind::NoKey,
     )?;
 
-    let node_writer =
-      Publisher::new(ros_default_publisher.create_datawriter_no_key(&ros_discovery_topic, None)?);
+    let node_writer = DdsPublisher::new(
+      ros_default_publisher.create_datawriter_no_key(&ros_discovery_topic, None)?,
+    );
 
     Ok(ContextInner {
       local_nodes: HashMap::new(),

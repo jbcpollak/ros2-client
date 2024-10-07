@@ -1,6 +1,7 @@
 use std::{
   collections::{btree_map::Entry, BTreeMap},
   marker::PhantomData,
+  sync::Arc,
 };
 
 use rustdds::{
@@ -30,7 +31,7 @@ use crate::{
 pub trait ActionTypes {
   type GoalType: Message + Clone; // Used by client to set a goal for the server
   type ResultType: Message + Clone; // Used by server to report result when action ends
-  type FeedbackType: Message; // Used by server to report progress during action execution
+  type FeedbackType: Message + Send + 'static + Sync; // Used by server to report progress during action execution
 
   fn goal_type_name(&self) -> &str;
   fn result_type_name(&self) -> &str;
@@ -39,7 +40,7 @@ pub trait ActionTypes {
 
 /// This is used to construct an ActionType implementation from pre-existing
 /// component types.
-pub struct Action<G, R, F> {
+pub struct Action<G, R, F: Send + 'static + Sync> {
   g: PhantomData<G>,
   r: PhantomData<R>,
   f: PhantomData<F>,
@@ -48,7 +49,7 @@ pub struct Action<G, R, F> {
   feedback_typename: String,
 }
 
-impl<G, R, F> Action<G, R, F>
+impl<G, R, F: Send + 'static + Sync> Action<G, R, F>
 where
   G: Message + Clone,
   R: Message + Clone,
@@ -70,7 +71,7 @@ impl<G, R, F> ActionTypes for Action<G, R, F>
 where
   G: Message + Clone,
   R: Message + Clone,
-  F: Message,
+  F: Message + Send + 'static + Sync,
 {
   type GoalType = G;
   type ResultType = R;
@@ -501,9 +502,9 @@ where
 
   pub(crate) my_result_server: Server<AService<GetResultRequest, GetResultResponse<A::ResultType>>>,
 
-  pub(crate) my_feedback_publisher: Publisher<FeedbackMessage<A::FeedbackType>>,
+  pub(crate) my_feedback_publisher: Arc<dyn Publisher<FeedbackMessage<A::FeedbackType>>>,
 
-  pub(crate) my_status_publisher: Publisher<action_msgs::GoalStatusArray>,
+  pub(crate) my_status_publisher: Arc<dyn Publisher<action_msgs::GoalStatusArray>>,
 
   pub(crate) my_action_name: Name,
 }
@@ -534,10 +535,12 @@ where
   ) -> &mut Server<AService<GetResultRequest, GetResultResponse<A::ResultType>>> {
     &mut self.my_result_server
   }
-  pub fn feedback_publisher(&mut self) -> &mut Publisher<FeedbackMessage<A::FeedbackType>> {
+  pub fn feedback_publisher(
+    &mut self,
+  ) -> &mut Arc<dyn Publisher<FeedbackMessage<A::FeedbackType>>> {
     &mut self.my_feedback_publisher
   }
-  pub fn my_status_publisher(&mut self) -> &mut Publisher<action_msgs::GoalStatusArray> {
+  pub fn my_status_publisher(&mut self) -> &mut Arc<dyn Publisher<action_msgs::GoalStatusArray>> {
     &mut self.my_status_publisher
   }
 

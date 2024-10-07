@@ -1,4 +1,6 @@
-use std::{io, marker::PhantomData, pin::Pin};
+use async_trait::async_trait;
+
+use std::{io, marker::PhantomData};
 
 use mio::{Evented, Poll, PollOpt, Ready, Token};
 use futures::{
@@ -19,11 +21,11 @@ use crate::{gid::Gid, message_info::MessageInfo, node::Node};
 ///
 /// Corresponds to a simplified [`DataWriter`](rustdds::no_key::DataWriter)in
 /// DDS
-pub struct DdsPublisher<M: Serialize + Send> {
+pub struct DdsPublisher<M: Serialize + Send + 'static> {
   datawriter: no_key::DataWriterCdr<M>,
 }
 
-impl<M: Serialize + Send> DdsPublisher<M> {
+impl<M: Serialize + Send + 'static> DdsPublisher<M> {
   // These must be created from Node
   pub(crate) fn new(datawriter: no_key::DataWriterCdr<M>) -> DdsPublisher<M> {
     DdsPublisher { datawriter }
@@ -39,7 +41,8 @@ impl<M: Serialize + Send> DdsPublisher<M> {
   }
 }
 
-impl<M: Serialize + Send> super::Publisher<M> for DdsPublisher<M> {
+#[async_trait]
+impl<M: Serialize + Send + 'static + Sync> super::Publisher<M> for DdsPublisher<M> {
   fn publish(&self, message: M) -> WriteResult<(), M> {
     self.datawriter.write(message, Some(Timestamp::now()))
   }
@@ -77,17 +80,15 @@ impl<M: Serialize + Send> super::Publisher<M> for DdsPublisher<M> {
   ///
   /// `my_node` must be the Node that created this Subscription, or the length
   /// of the wait is undefined.
-  fn wait_for_subscription(&self, my_node: &Node) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-    Box::pin(my_node.wait_for_reader(self.guid()))
+  async fn wait_for_subscription(&self, my_node: &Node) {
+    my_node.wait_for_reader(self.guid()).await;
   }
 
-  fn async_publish(&self, message: M) -> Pin<Box<dyn Future<Output = WriteResult<(), M>> + Send>> {
-    Box::pin(async move {
-      self
-        .datawriter
-        .async_write(message, Some(Timestamp::now()))
-        .await
-    })
+  async fn async_publish(&self, message: M) -> WriteResult<(), M> {
+    self
+      .datawriter
+      .async_write(message, Some(Timestamp::now()))
+      .await
   }
 }
 // ----------------------------------------------------

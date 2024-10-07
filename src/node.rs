@@ -37,7 +37,7 @@ use crate::{
   service::{Client, Server, Service, ServiceMapping},
 };
 
-type ParameterFunc = dyn Fn(&str, &ParameterValue) -> SetParametersResult + Send;
+type ParameterFunc = dyn Fn(&str, &ParameterValue) -> SetParametersResult + Send + Sync;
 
 /// Configuration of [Node]
 /// This is a builder-like struct.
@@ -159,7 +159,7 @@ pub struct Spinner {
   allow_undeclared_parameters: bool,
 
   parameter_servers: Option<ParameterServers>,
-  parameter_events_writer: Arc<Publisher<raw::ParameterEvent>>,
+  parameter_events_writer: Arc<dyn Publisher<raw::ParameterEvent>>,
   parameters: Arc<Mutex<BTreeMap<String, ParameterValue>>>,
   parameter_validator: Option<Arc<Mutex<Box<ParameterFunc>>>>,
   parameter_set_action: Option<Arc<Mutex<Box<ParameterFunc>>>>,
@@ -638,12 +638,12 @@ pub struct Node {
   status_event_senders: Arc<Mutex<Vec<async_channel::Sender<NodeEvent>>>>,
 
   // builtin writers and readers
-  rosout_writer: Option<dyn Publisher<Log>>,
+  rosout_writer: Option<Arc<dyn Publisher<Log>>>,
   rosout_reader: Option<Subscription<Log>>,
 
   // Parameter events (rcl_interfaces)
   // Parameter Services are inside Spinner
-  parameter_events_writer: Arc<DdsPublisher<raw::ParameterEvent>>,
+  parameter_events_writer: Arc<dyn Publisher<raw::ParameterEvent>>,
 
   // Parameter store
   parameters: Arc<Mutex<BTreeMap<String, ParameterValue>>>,
@@ -656,12 +656,16 @@ pub struct Node {
   sim_time: Arc<Mutex<ROSTime>>,
 }
 
+fn assert_send<T: Send + Sync>() {}
+
 impl Node {
   pub(crate) fn new(
     node_name: NodeName,
     mut options: NodeOptions,
     ros_context: Context,
   ) -> Result<Node, NodeCreateError> {
+    assert_send::<Node>();
+
     let paramtopic = ros_context.get_parameter_events_topic();
     let rosout_topic = ros_context.get_rosout_topic();
 
@@ -706,7 +710,7 @@ impl Node {
       status_event_senders: Arc::new(Mutex::new(Vec::new())),
       rosout_writer: None, // Set below
       rosout_reader: None,
-      parameter_events_writer: Arc::new(parameter_events_writer),
+      parameter_events_writer: parameter_events_writer,
       parameters: Arc::new(Mutex::new(parameters)),
       parameter_validator,
       parameter_set_action,
@@ -1139,7 +1143,7 @@ impl Node {
     }
   }
 
-  pub(crate) fn wait_for_reader(&self, writer: GUID) -> impl Future<Output = ()> {
+  pub(crate) async fn wait_for_reader(&self, writer: GUID) -> ReaderWait {
     // TODO: This may contain some synchrnoization hazard.
     let status_receiver = self.status_receiver();
 
@@ -1151,7 +1155,7 @@ impl Node {
       .map(|readers| !readers.is_empty()) // there is someone matched
       .unwrap_or(false); // we do not even know who is asking
 
-    // TODO: Is is possible to miss reader events if they appear after the check
+    // TODO: Is it possible to miss reader events if they appear after the check
     // above, but do not somehow end up in the status_receiver stream?
 
     if already_present {
@@ -1290,11 +1294,11 @@ impl Node {
   /// * `qos` - Should take [QOS](../dds/qos/struct.QosPolicies.html) and use it
   ///   if it's compatible with topics QOS. `None` indicates the use of Topics
   ///   QOS.
-  pub fn create_publisher<D: Serialize>(
+  pub fn create_publisher<D: Serialize + Send + 'static + Sync>(
     &mut self,
     topic: &Topic,
     qos: Option<QosPolicies>,
-  ) -> CreateResult<Publisher<D>> {
+  ) -> CreateResult<Arc<dyn Publisher<D>>> {
     let p = self.ros_context.create_publisher(topic, qos)?;
     self.add_writer(p.guid().into());
     Ok(p)

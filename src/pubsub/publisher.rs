@@ -1,11 +1,15 @@
-use std::{future::Future, pin::Pin};
+use async_trait::async_trait;
 
 use rustdds::dds::WriteResult;
 use serde::Serialize;
 
 use crate::{gid::Gid, node::Node};
 
-pub trait Publisher<M: Serialize + Send> {
+#[async_trait]
+pub trait Publisher<M>: Send + Sync
+where
+  M: Serialize + Send + 'static + Sync,
+{
   fn publish(&self, message: M) -> WriteResult<(), M>;
 
   fn assert_liveliness(&self) -> WriteResult<(), ()>;
@@ -16,7 +20,7 @@ pub trait Publisher<M: Serialize + Send> {
 
   fn get_subscription_count(&self, my_node: &Node) -> usize;
 
-  fn wait_for_subscription(&self, my_node: &Node) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+  async fn wait_for_subscription(&self, my_node: &Node) -> ();
 
-  fn async_publish(&self, message: M) -> Pin<Box<dyn Future<Output = WriteResult<(), M>> + Send>>;
+  async fn async_publish(&self, message: M) -> WriteResult<(), M>;
 }

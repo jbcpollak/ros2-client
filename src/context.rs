@@ -243,15 +243,15 @@ impl Context {
     &self,
     topic: &Topic,
     qos: Option<QosPolicies>,
-  ) -> dds::CreateResult<Box<dyn pubsub::Publisher<M>>>
+  ) -> dds::CreateResult<Arc<dyn pubsub::Publisher<M>>>
   where
-    M: Serialize + Send,
+    M: Serialize + Send + 'static + Sync,
   {
     let datawriter = self
       .get_ros_default_publisher()
       .create_datawriter_no_key(topic, qos)?;
 
-    Ok(Box::new(DdsPublisher::new(datawriter)))
+    Ok(Arc::new(DdsPublisher::new(datawriter)))
   }
 
   pub(crate) fn create_subscription<M>(
@@ -321,7 +321,7 @@ struct ContextInner {
 
   // ROS Discovery: topic, reader and writer
   ros_discovery_topic: Topic,
-  node_writer: Publisher<ParticipantEntitiesInfo>,
+  node_writer: Box<dyn pubsub::Publisher<ParticipantEntitiesInfo>>,
   // Corresponding ParticipantEntitiesInfo Subscriber is
   // (optionally) in Node --> Spinner, if it is
   // activated. Context does not have its own thread of control, so
@@ -366,9 +366,9 @@ impl ContextInner {
       TopicKind::NoKey,
     )?;
 
-    let node_writer = DdsPublisher::new(
+    let node_writer = Box::new(DdsPublisher::new(
       ros_default_publisher.create_datawriter_no_key(&ros_discovery_topic, None)?,
-    );
+    ));
 
     Ok(ContextInner {
       local_nodes: HashMap::new(),

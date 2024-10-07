@@ -10,8 +10,7 @@ use std::{
 };
 
 use futures::{
-  pin_mut, stream::FusedStream, task, task::Poll, Future, FutureExt, Stream, StreamExt,
-  stream,
+  pin_mut, stream::FusedStream, task, task::Poll, Future, FutureExt, Stream, StreamExt, stream,
 };
 use async_channel::Receiver;
 #[allow(unused_imports)]
@@ -38,7 +37,7 @@ use crate::{
   service::{Client, Server, Service, ServiceMapping},
 };
 
-type ParameterFunc = dyn Fn(&str, &ParameterValue) -> SetParametersResult + Send;
+type ParameterFunc = dyn Fn(&str, &ParameterValue) -> SetParametersResult + Send + Sync;
 
 /// Configuration of [Node]
 /// This is a builder-like struct.
@@ -160,7 +159,7 @@ pub struct Spinner {
   allow_undeclared_parameters: bool,
 
   parameter_servers: Option<ParameterServers>,
-  parameter_events_writer: Arc<Publisher<raw::ParameterEvent>>,
+  parameter_events_writer: Arc<dyn Publisher<raw::ParameterEvent>>,
   parameters: Arc<Mutex<BTreeMap<String, ParameterValue>>>,
   parameter_validator: Option<Arc<Mutex<Box<ParameterFunc>>>>,
   parameter_set_action: Option<Arc<Mutex<Box<ParameterFunc>>>>,
@@ -467,9 +466,9 @@ impl Spinner {
           closed.push(i) // mark for deletion
         }
         Err(e) => {
-         debug!("send_status_event: Send error for {i}: {e:?}");
-         // We do not do anything about the error. It may be that the receiver
-         // is not interested and the channel is full.
+          debug!("send_status_event: Send error for {i}: {e:?}");
+          // We do not do anything about the error. It may be that the receiver
+          // is not interested and the channel is full.
         }
       }
     }
@@ -639,12 +638,12 @@ pub struct Node {
   status_event_senders: Arc<Mutex<Vec<async_channel::Sender<NodeEvent>>>>,
 
   // builtin writers and readers
-  rosout_writer: Option<Publisher<Log>>,
+  rosout_writer: Option<Arc<dyn Publisher<Log>>>,
   rosout_reader: Option<Subscription<Log>>,
 
   // Parameter events (rcl_interfaces)
   // Parameter Services are inside Spinner
-  parameter_events_writer: Arc<Publisher<raw::ParameterEvent>>,
+  parameter_events_writer: Arc<dyn Publisher<raw::ParameterEvent>>,
 
   // Parameter store
   parameters: Arc<Mutex<BTreeMap<String, ParameterValue>>>,
@@ -657,12 +656,16 @@ pub struct Node {
   sim_time: Arc<Mutex<ROSTime>>,
 }
 
+fn assert_send<T: Send + Sync>() {}
+
 impl Node {
   pub(crate) fn new(
     node_name: NodeName,
     mut options: NodeOptions,
     ros_context: Context,
   ) -> Result<Node, NodeCreateError> {
+    assert_send::<Node>();
+
     let paramtopic = ros_context.get_parameter_events_topic();
     let rosout_topic = ros_context.get_rosout_topic();
 
@@ -707,7 +710,7 @@ impl Node {
       status_event_senders: Arc::new(Mutex::new(Vec::new())),
       rosout_writer: None, // Set below
       rosout_reader: None,
-      parameter_events_writer: Arc::new(parameter_events_writer),
+      parameter_events_writer: parameter_events_writer,
       parameters: Arc::new(Mutex::new(parameters)),
       parameter_validator,
       parameter_set_action,
@@ -1140,7 +1143,7 @@ impl Node {
     }
   }
 
-  pub(crate) fn wait_for_reader(&self, writer: GUID) -> impl Future<Output = ()> {
+  pub(crate) async fn wait_for_reader(&self, writer: GUID) -> ReaderWait {
     // TODO: This may contain some synchrnoization hazard.
     let status_receiver = self.status_receiver();
 
@@ -1152,7 +1155,7 @@ impl Node {
       .map(|readers| !readers.is_empty()) // there is someone matched
       .unwrap_or(false); // we do not even know who is asking
 
-    // TODO: Is is possible to miss reader events if they appear after the check
+    // TODO: Is it possible to miss reader events if they appear after the check
     // above, but do not somehow end up in the status_receiver stream?
 
     if already_present {
@@ -1239,7 +1242,7 @@ impl Node {
   /// * `qos` - Quality of Service parameters for the topic (not restricted only
   ///   to ROS2)
   ///
-  ///  
+  ///
   ///   [summary of all rules for topic and service names in ROS 2](https://design.ros2.org/articles/topic_and_service_names.html)
   ///   (as of Dec 2020)
   ///
@@ -1291,11 +1294,11 @@ impl Node {
   /// * `qos` - Should take [QOS](../dds/qos/struct.QosPolicies.html) and use it
   ///   if it's compatible with topics QOS. `None` indicates the use of Topics
   ///   QOS.
-  pub fn create_publisher<D: Serialize>(
+  pub fn create_publisher<D: Serialize + Send + 'static + Sync>(
     &mut self,
     topic: &Topic,
     qos: Option<QosPolicies>,
-  ) -> CreateResult<Publisher<D>> {
+  ) -> CreateResult<Arc<dyn Publisher<D>>> {
     let p = self.ros_context.create_publisher(topic, qos)?;
     self.add_writer(p.guid().into());
     Ok(p)
@@ -1644,13 +1647,11 @@ pub enum ReaderWait<'a> {
   // We need to wait for an event that is for us
   Wait {
     this_writer: GUID, // Writer who is waiting for Readers to appear
-    status_event_stream: stream::BoxStream<'a,NodeEvent>,
-
+    status_event_stream: stream::BoxStream<'a, NodeEvent>,
   },
   // No need to wait, can resolve immediately.
   Ready,
 }
-
 
 impl Future for ReaderWait<'_> {
   type Output = ();
@@ -1667,13 +1668,17 @@ impl Future for ReaderWait<'_> {
         loop {
           match status_event_stream.poll_next_unpin(cx) {
             // Check if we have RemoteReaderMatched event and it is for this_writer
-            Poll::Ready(Some(NodeEvent::DDS(DomainParticipantStatusEvent::RemoteReaderMatched {
-              local_writer, remote_reader
-            })))
-              if local_writer == this_writer => {
-                debug!("wait_for_reader: Matched remote reader {remote_reader:?}.");
-                return Poll::Ready(())
-              }
+            Poll::Ready(Some(NodeEvent::DDS(
+              DomainParticipantStatusEvent::RemoteReaderMatched {
+                local_writer,
+                remote_reader,
+              },
+            )))
+              if local_writer == this_writer =>
+            {
+              debug!("wait_for_reader: Matched remote reader {remote_reader:?}.");
+              return Poll::Ready(());
+            }
 
             Poll::Ready(_) => {
               // Received something else, such as other event or error
@@ -1699,7 +1704,7 @@ pub enum WriterWait<'a> {
   // We need to wait for an event that is for us
   Wait {
     this_reader: GUID,
-    status_event_stream: stream::BoxStream<'a,NodeEvent>,
+    status_event_stream: stream::BoxStream<'a, NodeEvent>,
   },
   // No need to wait, can resolve immediately.
   Ready,
@@ -1723,18 +1728,19 @@ impl Future for WriterWait<'_> {
           // installed and we are stuck.
           match status_event_stream.poll_next_unpin(cx) {
             // Check if we have RemoteWriterMatched event and it is for this_writer
-            Poll::Ready(Some(NodeEvent::DDS(DomainParticipantStatusEvent::RemoteWriterMatched {
-              local_reader,
-              remote_writer,
-            })))
+            Poll::Ready(Some(NodeEvent::DDS(
+              DomainParticipantStatusEvent::RemoteWriterMatched {
+                local_reader,
+                remote_writer,
+              },
+            )))
               if local_reader == this_reader =>
             {
               debug!("wait_for_writer: Matched remote writer {remote_writer:?}.");
-              return Poll::Ready(())
+              return Poll::Ready(());
             }
 
-            Poll::Ready(_) =>
-            {
+            Poll::Ready(_) => {
               // Received something else, such as other event or error
               trace!("=== other writer. Continue polling.");
               // No return, go to next iteration.
